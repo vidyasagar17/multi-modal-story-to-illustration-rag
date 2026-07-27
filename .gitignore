@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+.env.*
+
+# Secrets / API keys
+*.key
+secrets.*
+
+# Models & large artifacts
+*.gguf
+*.safetensors
+*.bin
+models/
+weights/
+
+# RAG / vector stores
+.chroma/
+chroma_db/
+*.faiss
+*.index
+
+# Generated outputs
+outputs/
+illustrations/
+*.png
+*.jpg
+*.jpeg
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
