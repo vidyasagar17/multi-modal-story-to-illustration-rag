@@ -24,6 +24,10 @@ secrets.*
 models/
 weights/
 
+# Fetched books & caches
+books/
+.cache/
+
 # RAG / vector stores
 .chroma/
 chroma_db/
