@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v9
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      # --locked fails if uv.lock is stale, so a dependency change that skipped
+      # `uv sync` cannot reach main.
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check .
+
+      # The suite is offline by design: no model weights, no API tokens, no network.
+      # If a test ever needs those, it belongs behind a marker, not in this job.
+      - name: Test
+        run: uv run pytest -q
