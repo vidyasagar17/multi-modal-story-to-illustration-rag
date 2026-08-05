@@ -11,7 +11,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v9
+      # Pinned to an exact version: setup-uv publishes no floating `v9` major tag.
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: "3.12"
           enable-cache: true
