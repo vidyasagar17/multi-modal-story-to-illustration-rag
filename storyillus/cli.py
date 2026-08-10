@@ -5,6 +5,7 @@ import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from openai import APIStatusError
 
@@ -14,7 +15,7 @@ from storyillus.ingest import chapters as chapters_mod
 from storyillus.ingest import gutenberg
 from storyillus.ingest.paginate import TARGET_WORDS, paginate
 from storyillus.llm.openai_compat import OpenAICompatLLM
-from storyillus.models import Book, Chapter
+from storyillus.models import Book, Chapter, Page
 
 
 def fetch(args: argparse.Namespace) -> int:
@@ -81,41 +82,58 @@ def plan(args: argparse.Namespace) -> int:
     print(f"Planning with {settings.llm.model_id}", file=sys.stderr)
 
     chapters_out = []
+    stopped = None
     for chapter in selected:
         pages = paginate(chapter.text, target_words=args.target_words)
         print(f"{chapter.heading}: {len(pages)} pages", file=sys.stderr)
 
-        planned = []
-        for page in pages:
-            try:
-                scene = condense(llm, page)
-            except APIStatusError as error:
-                print(f"\n{error.status_code} from {settings.llm.base_url}", file=sys.stderr)
-                print(_explain(error), file=sys.stderr)
-                return 1
-            print(f"  page {page.index}: {scene.key_visual[:70]}", file=sys.stderr)
-            planned.append(
-                {"index": page.index, "words": len(page.text.split()), "plan": asdict(scene)}
+        planned, stopped = _plan_pages(llm, pages)
+        if planned:
+            chapters_out.append(
+                {"index": chapter.index, "heading": chapter.heading, "pages": planned}
             )
-
-        chapters_out.append(
-            {"index": chapter.index, "heading": chapter.heading, "pages": planned}
-        )
+        if stopped:
+            print(f"\n{stopped.status_code} from {settings.llm.base_url}", file=sys.stderr)
+            print(_explain(stopped), file=sys.stderr)
+            break
 
     document = {
         "book": str(Path(args.book)),
         "config": settings.name,
         "model": settings.llm.model_id,
+        "complete": stopped is None,
         "chapters": chapters_out,
     }
     text = json.dumps(document, indent=2, ensure_ascii=False)
 
     if args.out:
         Path(args.out).write_text(text + "\n", encoding="utf-8")
-        print(f"Wrote {args.out}", file=sys.stderr)
+        planned_pages = sum(len(chapter["pages"]) for chapter in chapters_out)
+        print(f"Wrote {args.out} ({planned_pages} pages)", file=sys.stderr)
     else:
         print(text)
-    return 0
+    return 1 if stopped else 0
+
+
+def _plan_pages(
+    llm: OpenAICompatLLM, pages: list[Page]
+) -> tuple[list[dict[str, Any]], APIStatusError | None]:
+    """Condense pages until one fails, returning whatever was finished first.
+
+    A depleted quota or a revoked token stops the run, but the pages already planned cost
+    real tokens — they are handed back to be written rather than discarded.
+    """
+    planned: list[dict[str, Any]] = []
+    for page in pages:
+        try:
+            scene = condense(llm, page)
+        except APIStatusError as error:
+            return planned, error
+        print(f"  page {page.index}: {scene.key_visual[:70]}", file=sys.stderr)
+        planned.append(
+            {"index": page.index, "words": len(page.text.split()), "plan": asdict(scene)}
+        )
+    return planned, None
 
 
 def _load_chapters(path: Path, select: str | None) -> list[Chapter]:

@@ -260,12 +260,35 @@ rather than a folder the user has to fill themselves.
   `storyillus chapters` lists its 28 chapters from `Letter 1` (1,198 words) to
   `Chapter 24` (8,237 words).
 
-### Phase 1b — Text pipeline (no images)
-- Loader + paginator, `condense.py` producing valid `ScenePlan`s against a real hosted model
-  via the HF router (an instruction-tuned Qwen is the starting pick — big enough that JSON
-  adherence is the pipeline's problem to get right, not the model's).
-- CLI subcommand `uv run storyillus plan story.txt` dumping the plans as JSON.
-- **Done when:** a 10-page story yields 10 well-formed `ScenePlan`s.
+### Phase 1b — Text pipeline (no images) — *done*
+- DONE: `ingest/paginate.py` — paragraphs grouped to a ~300-word target, never split. A page
+  closes when the next paragraph would carry it further from the target than stopping does;
+  closing at the first overshoot instead lands pages well above the target.
+- DONE: `llm/openai_compat.py` — one client for the HF router, vLLM, and Ollama's `/v1`, which
+  differ only in `base_url` and `model_id`. 429 and 5xx retry with backoff.
+- DONE: `agent/condense.py` — page to `ScenePlan`, schema in the prompt, summary-only fallback.
+- DONE: CLI `uv run storyillus plan <book.md> [--select 5-6]`.
+- **No separate `loader.py`.** `split_chapters` already degrades a headingless `.txt` or `.md`
+  to one `(whole text)` chapter, so the loader had no work left to do. Only `.epub` is
+  uncovered, and no story we care about needs it yet.
+- **The HF token needs the "Make calls to Inference Providers" scope.** A fine-grained token
+  with only `repo.content.read` authenticates fine — `whoami-v2` returns 200 — and then every
+  router call 403s. `whoami`'s `fineGrained.global` list is not a reliable indicator either;
+  the only real test is a call. The 403 handler names the scope and links the settings page.
+- **A stopped run keeps its finished pages.** The first live run hit `402 — depleted your
+  monthly included credits` on page 4 of chapter 2, and `plan()` returned before writing
+  anything, discarding 10 pages of paid output. The page loop is now `_plan_pages()`, which
+  hands back what it completed alongside the error; the document is written either way with
+  a `"complete"` flag. Four tests cover it.
+- **Character names arrive unnormalised** — `Victor`, `Victor Frankenstein`, `I`, and
+  `Victor's father` came back as four separate characters, `Elizabeth` / `Elizabeth Lavenza`
+  and `Clerval` / `Henry Clerval` as two more pairs: 20 names for about 6 people. Name-keyed
+  retrieval is the consistency strategy's core mechanism, so Phase 2 has to canonicalise
+  names before they reach the store.
+- **Done when:** ✅ `uv run storyillus plan books/frankenstein-or-the-modern-prometheus.md
+  --select 5-6` planned **16 of 16 pages** against `Qwen/Qwen3-235B-A22B-Instruct-2507` in
+  1m45s — zero summary-only fallbacks, no empty fields, `"complete": true`. Roughly 8.2k
+  input and 3.0k output tokens for the run, well under a cent at cheap-provider rates.
 
 ### Phase 2 — Memory layer
 - Embedder, `VectorStore` protocol, Chroma implementation only, record schema.
@@ -354,13 +377,15 @@ Resolved: chapter-level scope and local single-user hosting — see Scope Decisi
 1. ~~`models.py`~~ — done.
 2. ~~`chapters.py` + selection~~ — done.
 3. ~~Phase 0: `config.py`, the two protocols, `FakeLLM` / `FakeImage`~~ — done.
-4. **`condense.py` + the `openai_compat` backend** pointed at the HF router, with 429/503
-   backoff. Eyeball `ScenePlan` quality on Frankenstein chapter 5 (2,204 words — a real
-   chapter, small enough to iterate on) before any image code exists. This is the first
-   code that spends a token, so it is also where `configs/hosted.yaml`'s pinned model id
-   gets verified against a live call.
-5. **`paginate.py`** — split a selected chapter into illustration-sized pages. Deferred until
-   `condense.py` shows how much text a good `ScenePlan` actually wants.
+4. ~~`condense.py` + the `openai_compat` backend, verified against a live call~~ — done.
+5. ~~`paginate.py`~~ — done. A 300-word target gives pages a `ScenePlan` can describe without
+   the model having to pick between two unrelated moments.
+6. **Phase 2: name canonicalisation before the vector store.** The live run returned 20
+   character names for about 6 people. Whatever `update_memory.py` writes has to resolve
+   aliases and first-person references to one canonical name, or name-keyed retrieval
+   returns three partial sheets for Victor instead of one complete one.
+7. **`memory/` — embedder, `VectorStore` protocol, Chroma.** Phase 2 proper. The 16 plans in
+   `.cache/ch5-6-plans.json` are the fixture to develop it against, so it costs no tokens.
 
 `examples/short_story.txt` is no longer needed as the primary fixture — chapter 1 of a
 fetched Gutenberg book is a better one, since it's the actual input shape the product takes.
