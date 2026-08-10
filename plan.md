@@ -40,12 +40,14 @@ storyillus/
     chapters.py        # split a fetched .md on its `## ` headings -> Chapter list
     paginate.py        # split into story pages (chapter, blank-line, or token budget)
   llm/
-    base.py            # LLMBackend protocol: complete(), complete_json()
+    base.py            # DONE: LLMBackend protocol + the complete_json wrapper
+    fake.py            # DONE: FakeLLM — scripted replies, records prompts
     openai_compat.py   # one client: base_url + api_key + model_id
                        # covers HF router, vLLM, and Ollama's /v1 endpoint
   imagegen/
-    base.py            # ImageBackend protocol: generate(prompt, negative, seed) -> PIL
-    diffusers_local.py # SD 1.5 / SDXL via diffusers
+    base.py            # DONE: ImageBackend protocol: generate(prompt, negative, seed) -> PIL
+    fake.py            # DONE: FakeImage — flat colour keyed by seed
+    diffusers_local.py # Z-Image Turbo / SDXL via diffusers
   memory/
     store.py           # VectorStore protocol: add(), query(), persist()
     chroma_store.py    # the one implementation; a second arrives when something needs it
@@ -182,28 +184,42 @@ Phase 1a landed early — book acquisition was built before the text pipeline be
 supplies the input everything else is developed against. Phases are ordered by dependency,
 not by the order they happened to get done.
 
-### Phase 0 — Scaffolding — *partly done*
+### Phase 0 — Scaffolding — *done*
 - DONE: `pyproject.toml` (hatchling, `storyillus` script entry point), `ruff` (line-length
   100), `pytest`, `uv.lock`, package skeleton.
 - DONE: `models.py` — `Book`, `Chapter`, `Page`, `ScenePlan`, `MemoryRecord`, `PageResult`.
   `Book` moved here out of `ingest/gutenberg.py`: ingest creates it, but the CLI, renderer,
   and web API all consume it, so no single stage should own it.
-- TODO: `config.py` + YAML loading, the `LLMBackend` / `ImageBackend` protocols, and the
-  `FakeLLM` / `FakeImage` pair.
-- **Status:** `uv run pytest` passes offline — 37 tests, 0.05s, no weights, no tokens.
-- `LLMBackend` and `ImageBackend` protocols plus a `FakeLLM` / `FakeImage` pair used by
-  every test so the suite runs with no models installed.
+- DONE: `config.py` — `LLMConfig` / `ImageConfig` / `Config`, YAML loading, token
+  resolution. Ships `configs/hosted.yaml` and `configs/local.yaml`.
+- DONE: `LLMBackend` and `ImageBackend` protocols plus the `FakeLLM` / `FakeImage` pair, so
+  the suite runs with no models installed.
 - Credentials read from `.env` only (already gitignored) — never from YAML, never committed.
   Config carries `base_url` and `model_id`; the token is looked up by variable name.
 - **The HF token variable is `hf_token`, lowercase.** Env vars are case-sensitive, and
   `huggingface_hub` only auto-discovers the uppercase `HF_TOKEN`, so the token is read
-  explicitly (`os.environ["hf_token"]`) and passed to the client rather than picked up
-  implicitly. One place does this — `config.py` — and every backend receives it as an
-  argument.
+  explicitly and passed to the client rather than picked up implicitly. One place does this
+  — `config.py` — and every backend receives it as an argument. A test asserts that setting
+  `HF_TOKEN` instead of `hf_token` does *not* satisfy the config.
 - Missing token fails at config load with a clear message naming the variable, not deep in
   the first API call.
-- **Done when:** `uv run pytest` passes offline, on a machine with zero model weights and
-  no API tokens set.
+- **`complete_json` is a function over a backend, not a protocol method.** The plan first
+  listed it as the second method on `LLMBackend`. Parse-and-retry is identical for every
+  backend, so making it a method would mean every implementation reimplementing or
+  inheriting it. The protocol is `complete()` alone; `complete_json(llm, prompt)` wraps any
+  backend. It raises `LLMJSONError` on give-up rather than inventing a value — the
+  summary-only fallback is `condense.py`'s policy to make, not the parser's.
+- **429/503 backoff moved to Phase 1b.** It belongs in the HTTP client, where a status code
+  exists; a `FakeLLM` has none. Nothing in Phase 0 can exercise it.
+- **`Qwen-Image-2.0` has no weights on the Hub.** `models.md` names it the primary image
+  pick, but `huggingface.co/api/models/Qwen/Qwen-Image-2.0` 404s and the `Qwen` org lists
+  only `Qwen-Image`, `-2512`, `-Edit`, `-Edit-2509`, `-Edit-2511`. If it is API-only it
+  fails the open-weights constraint outright. `configs/hosted.yaml` therefore pins
+  `Qwen/Qwen-Image-Edit-2511` (verified, Apache 2.0), which `models.md` already wants for
+  every panel after the first. Revisit in Phase 3.
+- **Done when:** ✅ `env -u hf_token uv run pytest -q` passes — 59 tests, 0.10s, no weights,
+  no tokens, no network. `uv run ruff check .` clean. Both shipped configs load, and
+  `configs/hosted.yaml` resolves a real token out of `.env`.
 
 ### Phase 1a — Book acquisition — *done, minus chapter splitting*
 The user names a book, it is found, downloaded, and written as markdown. This is what makes
@@ -337,11 +353,12 @@ Resolved: chapter-level scope and local single-user hosting — see Scope Decisi
 
 1. ~~`models.py`~~ — done.
 2. ~~`chapters.py` + selection~~ — done.
-3. **Finish Phase 0:** `config.py` with YAML loading and the `hf_token` rule, the two backend
-   protocols, and `FakeLLM` / `FakeImage`. The test suite stays offline.
-4. **`condense.py` + the `openai_compat` backend** pointed at the HF router. Eyeball
-   `ScenePlan` quality on Frankenstein chapter 5 (2,204 words — a real chapter, small enough
-   to iterate on) before any image code exists.
+3. ~~Phase 0: `config.py`, the two protocols, `FakeLLM` / `FakeImage`~~ — done.
+4. **`condense.py` + the `openai_compat` backend** pointed at the HF router, with 429/503
+   backoff. Eyeball `ScenePlan` quality on Frankenstein chapter 5 (2,204 words — a real
+   chapter, small enough to iterate on) before any image code exists. This is the first
+   code that spends a token, so it is also where `configs/hosted.yaml`'s pinned model id
+   gets verified against a live call.
 5. **`paginate.py`** — split a selected chapter into illustration-sized pages. Deferred until
    `condense.py` shows how much text a good `ScenePlan` actually wants.
 

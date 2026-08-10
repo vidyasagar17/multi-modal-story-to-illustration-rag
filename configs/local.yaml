@@ -1,0 +1,20 @@
+# Everything on this machine: Ollama for text, Z-Image Turbo for draft illustrations.
+# No token anywhere, so no `token_env` — Ollama ignores the key it is sent.
+name: local
+
+llm:
+  base_url: http://localhost:11434/v1
+  model_id: qwen3:8b
+  temperature: 0.3
+  max_tokens: 1024
+
+image:
+  # A turbo model: few steps, almost no guidance. Fast enough to iterate on.
+  backend: diffusers
+  model_id: Tongyi-MAI/Z-Image-Turbo
+  steps: 8
+  guidance: 1.0
+  width: 768
+  height: 768
+
+seed: 20260809

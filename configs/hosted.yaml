@@ -1,0 +1,23 @@
+# Default on an 8 GB machine: hosted inference of open weights, nothing runs locally.
+# Model ids are pinned exactly — a 404 should fail loudly, not silently substitute.
+name: hosted
+
+llm:
+  base_url: https://router.huggingface.co/v1
+  model_id: Qwen/Qwen3-235B-A22B-Instruct-2507
+  token_env: hf_token
+  temperature: 0.3
+  max_tokens: 1024
+
+image:
+  # Apache 2.0, and takes reference images, which is what keeps a character stable.
+  backend: huggingface
+  model_id: Qwen/Qwen-Image-Edit-2511
+  token_env: hf_token
+  steps: 30
+  guidance: 4.0
+  width: 1024
+  height: 1024
+
+# Base seed for the run; per-character offsets are added to it.
+seed: 20260809

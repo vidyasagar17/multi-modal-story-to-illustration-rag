@@ -5,6 +5,10 @@ description = "Turn public-domain stories into illustrated storybooks with open-
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28",
+    "openai>=2.53.0",
+    "pillow>=12.3.0",
+    "python-dotenv>=1.2.2",
+    "pyyaml>=6.0.3",
 ]
 
 [project.scripts]
