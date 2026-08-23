@@ -49,16 +49,18 @@ storyillus/
     fake.py            # DONE: FakeImage — flat colour keyed by seed
     diffusers_local.py # Z-Image Turbo / SDXL via diffusers
   memory/
-    store.py           # VectorStore protocol: add(), query(), persist()
-    chroma_store.py    # the one implementation; a second arrives when something needs it
-    embedder.py        # sentence-transformers wrapper
-    schema.py          # record kinds: character, setting, style, scene
+    embedder.py        # DONE: Embedder protocol
+    local_embedder.py  # DONE: SentenceTransformerEmbedder — local, no hosted path works today
+    fake.py            # DONE: FakeEmbedder — deterministic hash-based vectors
+    store.py           # DONE: VectorStore protocol + LocalStore — linear scan, no Chroma
+                       # (record kinds live in models.py's RecordKind — no separate schema.py)
   agent/
-    condense.py        # step 1: page -> condensed narrative beats
-    retrieve.py        # step 2: build retrieval query, fetch context
+    condense.py        # DONE: step 1: page -> condensed narrative beats
+    canonicalize.py    # DONE: collapse alias/first-person references before the store
+    retrieve.py        # DONE: step 2: name-keyed + semantic + continuity retrieval
     prompt_builder.py  # step 3: condensed + context -> image prompt
     illustrate.py      # step 4: call image backend
-    update_memory.py   # step 5: extract new entities, write back
+    update_memory.py   # DONE: step 5: write-once entity extraction + scene record
     graph.py           # orchestration wiring the five steps per page
   render/
     book.py            # assemble pages + images into HTML and PDF
@@ -308,18 +310,50 @@ rather than a folder the user has to fill themselves.
   correctly. Background one-off characters are the residual risk. Not worth chasing further
   without more evidence; revisit if it bites a book where minor characters recur under vague
   references.
-- Embedder, `VectorStore` protocol, Chroma implementation only, record schema.
-- `update_memory.py` entity extraction (built on `canonicalize_names`) + `retrieve.py` scoped
-  retrieval.
-- **Done when:** running Phase 1b over a story populates a store where querying a
+- DONE: `memory/embedder.py` (`Embedder` protocol) + `memory/local_embedder.py`
+  (`SentenceTransformerEmbedder`) + `memory/fake.py` (`FakeEmbedder`).
+- DONE: `memory/store.py` — `VectorStore` protocol + `LocalStore`, the one implementation.
+- DONE: `agent/retrieve.py` (name-keyed characters, semantic top-k setting, previous-scene
+  continuity) + `agent/update_memory.py` (write-once character/setting sheets, per-page scene
+  record), built on `canonicalize_names`. CLI: `uv run storyillus remember <canonical.json>
+  --config configs/hosted.yaml --store .cache/memory.json`.
+- **Embedder is local `sentence-transformers`, not a hosted HF-router call.** Verified live:
+  the router 404s on every embedding model/provider suffix tried (`sentence-transformers/
+  all-MiniLM-L6-v2`, `BAAI/bge-small-en-v1.5`, with and without `:hf-inference`), and the
+  legacy `api-inference.huggingface.co` feature-extraction API no longer resolves at all.
+  Unlike the LLM and image models, nothing about embedding models needs hosting — the one used
+  here is ~22M params — so local is both the only confirmed-working path and the right one.
+  `uv add sentence-transformers` — the first heavy dependency in this repo (torch, transformers,
+  numpy). Weights download once, anonymously (public model, no token), then fully offline.
+- **Vector store is a hand-rolled linear scan, not Chroma.** A book's memory is tens of
+  records — not the millions of vectors an ANN index earns its keep on. `LocalStore` ranks by
+  cosine similarity computed in plain Python (no numpy needed for this, even though it arrives
+  transitively via `sentence-transformers`), and persists as one JSON file. Loading that file
+  back at the start of a run is also what makes memory persist across chapters of the same
+  book — the open question from Phase 1b is resolved as a side effect of the design, not a
+  separate feature.
+- **`memory/schema.py` was never needed.** `RecordKind` and `MemoryRecord` already lived in
+  `models.py` since Phase 0 — no single stage should own a type every stage consumes, and that
+  was already true here.
+- **Deliberately deferred, not silently skipped:** amending an existing sheet on explicit
+  textual evidence; semantic (threshold) dedup of settings on write (dedup is exact-name only;
+  semantic search still happens at *retrieval* time, as designed); style-block generation
+  (global/constant, never retrieved — Phase 3's prompt builder consumes it); `graph.py`
+  orchestration threading `previous_scene` across a full page loop (Phase 3, once
+  `illustrate.py`/`prompt_builder.py` exist to make the full five-step loop meaningful).
+- **Done when:** ✅ running Phase 1b over a story populates a store where querying a
   character's name returns that character's sheet as the top hit.
-- **Verified:** `env -u hf_token uv run pytest -q` — 95 passed. `uv run ruff check .` clean.
-  Live run against `.cache/ch5-6-plans.json` (Frankenstein ch1-2 / catalog ch5-6) against
-  `Qwen/Qwen3-235B-A22B-Instruct-2507`: 20 raw names, 34 mentions, collapsed to 8 canonical
-  people — `Victor`/`I`/`the narrator`/`the young man` → `Victor Frankenstein`;
+- **Verified:** `env -u hf_token uv run pytest -q` — 112 passed. `uv run ruff check .` clean.
+  Live run of `canonicalize` against `.cache/ch5-6-plans.json` (Frankenstein ch1-2 / catalog
+  ch5-6) against `Qwen/Qwen3-235B-A22B-Instruct-2507`: 20 raw names, 34 mentions, collapsed to
+  8 canonical people — `Victor`/`I`/`the narrator`/`the young man` → `Victor Frankenstein`;
   `Elizabeth` → `Elizabeth Lavenza`; `Clerval` → `Henry Clerval`; `my father`/`Victor's
   father`/`father` → `Victor's father`; `my mother`/`his wife`/`the narrator's mother` →
-  `Caroline Beaufort`.
+  `Caroline Beaufort`. Live run of `remember` against the canonicalized output wrote 8
+  character sheets, 16 setting sheets, and 16 scene records to `.cache/memory.json`; querying
+  `store.get_by_name("Victor Frankenstein")` returned the exact written sheet (build, hair,
+  clothing, all grounded in the text), and an unseen name (`Robert Walton`) correctly returned
+  `None` rather than a hallucinated sheet.
 
 ### Phase 3 — Image generation
 - Diffusers backend (SD 1.5 first — fastest to iterate), prompt builder that fuses style
@@ -376,7 +410,7 @@ Subjective output needs at least some measurable signal:
 | LLM returns malformed JSON | Schema in prompt, retry wrapper, summary-only fallback |
 | Hosted model ID deprecated by provider | Pin exact `org/model` in config and in the run manifest; a 404 fails loudly rather than silently substituting a different model |
 | Rate limits / cold starts on hosted inference | Backoff retry on 429/503; `FakeLLM` keeps the test suite network-free |
-| Vector store lock-in | `VectorStore` protocol keeps Chroma at arm's length; write the second implementation the day a second store is actually needed, not before |
+| Vector store lock-in | `VectorStore` protocol keeps any real database at arm's length; `LocalStore` is a linear scan by design — write a second implementation the day the record count actually needs one, not before |
 | Memory poisoning by bad extraction | Write-once sheets; amendments require explicit textual evidence |
 | A novel is 100× the size of the test story | Chapter is the unit of illustration, not the book; `--chapter` selection required before any full-length text enters the pipeline |
 | Gutenberg blocks the client for bulk fetching | Catalog cached after first download, books cached by id, descriptive `User-Agent` set, one request per book — never crawl |
@@ -389,9 +423,10 @@ Subjective output needs at least some measurable signal:
   scene breaks? (The chapter boundary itself is settled — see Scope Decisions.)
 - Should the style block be user-specifiable, or always LLM-derived from the story?
 - One illustration per page, or let the agent decide which pages deserve art?
-- Does the memory store persist across chapters of the same book? It should — character
-  sheets built in chapter 1 are exactly what chapter 2 needs — but that makes the store
-  book-scoped rather than run-scoped, which Phase 2 has to account for.
+- ~~Does the memory store persist across chapters of the same book?~~ Resolved in Phase 2:
+  yes — `LocalStore.load()`/`persist()` round-trip through one JSON file, so a `--store` path
+  is book-scoped by construction, not run-scoped. Verified live: a name written while
+  remembering chapter 5 was already known when remembering chapter 6 against the same store.
 - License for the repo (README lists it as TBD). The output is derived from public-domain
   texts, so nothing blocks a permissive choice.
 
@@ -406,9 +441,12 @@ Resolved: chapter-level scope and local single-user hosting — see Scope Decisi
 5. ~~`paginate.py`~~ — done. A 300-word target gives pages a `ScenePlan` can describe without
    the model having to pick between two unrelated moments.
 6. ~~Phase 2: name canonicalisation before the vector store~~ — done. See Phase 2 above.
-7. **`memory/` — embedder, `VectorStore` protocol, Chroma.** Phase 2 proper, next up. The 16
-   plans in `.cache/ch5-6-plans.json` — now also `.cache/ch5-6-canonical.json` with names
-   resolved — are the fixture to develop it against, so it costs no tokens.
+7. ~~`memory/` — embedder, `VectorStore` protocol~~ — done (as a local embedder and a
+   hand-rolled store, not the originally-proposed hosted embeddings / Chroma — see Phase 2).
+8. **Phase 3: image generation.** Diffusers backend (SD 1.5 first) + `prompt_builder.py`
+   fusing the style block, `retrieve()`'s context, and `plan.key_visual`. `.cache/memory.json`
+   (character/setting sheets) and `.cache/ch5-6-canonical.json` (plans) are both ready fixtures
+   to develop it against at zero token cost.
 
 `examples/short_story.txt` is no longer needed as the primary fixture — chapter 1 of a
 fetched Gutenberg book is a better one, since it's the actual input shape the product takes.

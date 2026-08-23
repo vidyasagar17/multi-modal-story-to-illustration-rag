@@ -12,12 +12,16 @@ from openai import APIStatusError
 from storyillus import config
 from storyillus.agent.canonicalize import apply_canonical_names, canonicalize_names
 from storyillus.agent.condense import condense
+from storyillus.agent.update_memory import update_memory
 from storyillus.ingest import chapters as chapters_mod
 from storyillus.ingest import gutenberg
 from storyillus.ingest.paginate import TARGET_WORDS, paginate
 from storyillus.llm.base import LLMBackend
 from storyillus.llm.openai_compat import OpenAICompatLLM
-from storyillus.models import Book, Chapter, Page, ScenePlan
+from storyillus.memory.embedder import Embedder
+from storyillus.memory.local_embedder import SentenceTransformerEmbedder
+from storyillus.memory.store import LocalStore, VectorStore
+from storyillus.models import Book, Chapter, MemoryRecord, Page, ScenePlan
 
 
 def fetch(args: argparse.Namespace) -> int:
@@ -179,6 +183,64 @@ def _canonicalize_document(document: dict[str, Any], llm: LLMBackend) -> dict[st
     return mapping
 
 
+def remember(args: argparse.Namespace) -> int:
+    """Populate the memory store from a canonicalized `plan`/`canonicalize` document."""
+    try:
+        document = json.loads(Path(args.plans).read_text(encoding="utf-8"))
+        settings = config.load(args.config)
+    except (OSError, ValueError, config.ConfigError) as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    llm = OpenAICompatLLM(settings.llm)
+    embedder = SentenceTransformerEmbedder()
+    store_path = Path(args.store)
+    store = LocalStore.load(store_path)
+    print(f"Remembering with {settings.llm.model_id}, store at {store_path}", file=sys.stderr)
+
+    written, stopped = _remember_document(document, llm, store, embedder)
+    store.persist(store_path)
+
+    by_kind: dict[str, int] = {}
+    for record in written:
+        by_kind[record.kind] = by_kind.get(record.kind, 0) + 1
+    print(f"Wrote {dict(by_kind)}", file=sys.stderr)
+
+    all_names = (
+        name
+        for chapter in document["chapters"]
+        for page in chapter["pages"]
+        for name in page["plan"]["characters"]
+    )
+    for name in dict.fromkeys(all_names):
+        if sheet := store.get_by_name(name):
+            print(f"  {sheet.name}: {sheet.description[:100]}", file=sys.stderr)
+
+    if stopped:
+        print(f"\n{stopped.status_code} from {settings.llm.base_url}", file=sys.stderr)
+        print(_explain(stopped), file=sys.stderr)
+    return 1 if stopped else 0
+
+
+def _remember_document(
+    document: dict[str, Any], llm: LLMBackend, store: VectorStore, embedder: Embedder
+) -> tuple[list[MemoryRecord], APIStatusError | None]:
+    """Run `update_memory` over every page across every chapter, in order.
+
+    A depleted quota stops the run, but whatever was already written stays in `store` — the
+    same fail-soft posture as `_plan_pages`.
+    """
+    written: list[MemoryRecord] = []
+    for chapter in document["chapters"]:
+        for page in chapter["pages"]:
+            plan = ScenePlan(**page["plan"])
+            try:
+                written += update_memory(llm, store, embedder, plan, page_index=page["index"])
+            except APIStatusError as error:
+                return written, error
+    return written, None
+
+
 def _load_chapters(path: Path, select: str | None) -> list[Chapter]:
     found = chapters_mod.split_chapters(path.read_text(encoding="utf-8"))
     if not found:
@@ -256,6 +318,16 @@ def main() -> int:
     canon_parser.add_argument("--config", default="configs/hosted.yaml", help="config to run with")
     canon_parser.add_argument("--out", help="write JSON here instead of stdout")
     canon_parser.set_defaults(handler=canonicalize)
+
+    remember_parser = subparsers.add_parser(
+        "remember", help="write character/setting sheets into the memory store"
+    )
+    remember_parser.add_argument("plans", help="path to a canonicalized JSON document")
+    remember_parser.add_argument("--config", default="configs/hosted.yaml", help="config to run with")
+    remember_parser.add_argument(
+        "--store", default=".cache/memory.json", help="where the memory store lives"
+    )
+    remember_parser.set_defaults(handler=remember)
 
     args = parser.parse_args()
     return args.handler(args)
