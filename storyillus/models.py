@@ -92,3 +92,4 @@ class PageResult:
     retrieved: list[MemoryRecord] = field(default_factory=list)
     image_path: Path | None = None
     error: str | None = None
+    duration_s: float = 0.0

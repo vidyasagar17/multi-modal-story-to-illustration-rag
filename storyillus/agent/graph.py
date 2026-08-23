@@ -16,6 +16,7 @@ Two different fail-soft policies meet here, deliberately different:
   a character's sheet shouldn't be held hostage by one bad render.
 """
 
+import time
 from pathlib import Path
 
 from storyillus.agent.illustrate import illustrate, page_seed
@@ -45,6 +46,7 @@ def illustrate_page(
 ) -> tuple[PageResult, MemoryRecord | None]:
     """Returns this page's result, plus its scene record for the caller to pass as the next
     call's `previous_scene` — no `get_by_name` lookup involved."""
+    started = time.monotonic()
     context = retrieve(store, embedder, plan, previous_scene=previous_scene)
     prompt, negative = build_prompt(style_block, context, plan)
     seed = page_seed(base_seed, plan.characters)
@@ -73,5 +75,6 @@ def illustrate_page(
         retrieved=context,
         image_path=image_path,
         error=error,
+        duration_s=time.monotonic() - started,
     )
     return result, scene
