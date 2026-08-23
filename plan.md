@@ -438,11 +438,55 @@ rather than a folder the user has to fill themselves.
   no new tokens to develop against.
 
 ### Phase 5 — Quality & scale
-- SDXL config, optional IP-Adapter / reference-image conditioning for stronger character
-  identity, batch and resume support for long stories.
-- Optional whole-book mode: an LLM pass that picks the N most illustration-worthy scenes
-  across a full novel, instead of illustrating a chapter exhaustively.
-- Consistency evaluation (below).
+- DONE (one slice): reference-image conditioning for character consistency, the fix `plan.md`'s
+  own risk table already named for "character drift despite RAG." `MemoryRecord` gained
+  `reference_image: str | None`; `ImageBackend` gained `generate_with_references()`;
+  `update_memory()` now threads the current page's own rendered image forward as the reference
+  for any *new* character/setting sheet or scene record it writes; `graph.py`'s
+  `_collect_references()` gathers whichever references already exist (primary character, then
+  the previous panel, then a setting) before the image call. Purely additive and config-gated:
+  unset `image.edit_model_id` and behavior is byte-for-byte what Phase 3/4 already shipped.
+- **`huggingface_hub`'s `image_to_image()` doesn't support this model's real API as
+  documented.** `Qwen/Qwen-Image-Edit-2511` wants a plural `images` field (up to 3 reference
+  images); the library's method only exposes a single `image` argument and 400s against this
+  model outright ("field `images` is required"). Its own wavespeed provider code sends a
+  singular `image` field the real endpoint ignores. Workaround: pass `images=[...]` (base64
+  data URIs) as an extra keyword argument — it lands in the request body correctly. Verified
+  decisively with two unrelated synthetic images (a green circle on red, a yellow triangle on
+  blue): the output combined shapes from *both*, proving real multi-reference conditioning, not
+  just single-image editing. `seed=` is accepted the same undocumented way; not verified
+  byte-for-byte reproducible.
+- **No dedicated "character portrait" generation step** — the page a character is first
+  introduced on already produces an image; that image is reused as their reference rather than
+  generating a separate clean portrait. Simpler, no extra cost, but this is exactly what the
+  live run's finding (below) traces back to.
+- **Live-verified finding, both the win and the limitation, reported honestly rather than
+  assumed:** ran `illustrate` on a *fresh* store (page 1 has no reference; later pages do) over
+  the ch5-6 fixture. The mechanism demonstrably works — a distinctive bearded man in a black
+  coat and hat recurred faithfully, same face, same clothing, across pages in *both* chapters
+  (`ch005-page004`, `ch005-page007`, `ch006-page007`), which is the actual consistency
+  mechanism functioning as designed. But that consistent identity isn't Victor — his real sheet
+  says young, dark-haired, slender. Page 1's render (his first appearance) didn't clearly
+  depict a recognizable "Victor" at all, so the wrong identity got locked in and then faithfully
+  repeated — consistent, but consistently wrong. Two more things worth naming: `ch005-page007`
+  rendered a partially undressed figure (an image-quality/content issue distinct from the
+  consistency question); and because the previous *page's whole image* is also fed in as a
+  continuity reference, several pages converged on near-identical backgrounds (same window,
+  storm, candlelit table) even where the story text describes different times and places —
+  character consistency may be coming partly at the cost of scene diversity.
+- **Decision: ship as-is, limitations documented, not silently smoothed over.** This is
+  additive and config-gated, so shipping it now regresses nothing; refining the reference
+  source (a dedicated portrait generation step) or dropping the previous-panel reference (to
+  stop scene bleed-through) are real options, deferred until there's a specific reason to
+  invest in one over the other — the same "build the simplest thing, verify with evidence"
+  discipline this whole project has followed.
+- **Done when (this slice):** ✅ multi-reference conditioning verified working end-to-end;
+  known limitations (reference quality depends on the first render; scene bleed-through)
+  documented rather than hidden.
+- **Verified:** `env -u hf_token uv run pytest -q` — 149 passed. `uv run ruff check .` clean.
+  Live run: `illustrate` on a fresh store, 16/16 pages rendered — see findings above.
+- **Still open in Phase 5:** SDXL config, batch/resume for long stories, whole-book mode,
+  consistency evaluation (CLIP-based metrics + human spot-check rubric).
 
 ### Phase 6 — Web frontend
 Last, deliberately. Until Phase 4 there is no finished artifact to display, and a UI built
@@ -476,7 +520,7 @@ Subjective output needs at least some measurable signal:
 
 | Risk | Mitigation |
 |---|---|
-| Character drift despite RAG | Name-keyed retrieval + fixed sheets; escalate to IP-Adapter in Phase 5 |
+| Character drift despite RAG | Name-keyed retrieval + fixed sheets; reference-image conditioning added in Phase 5 — proven to hold an identity consistent across pages, but only as good as the first render depicting that identity clearly (see Phase 5's live-run finding) |
 | Local image gen is slow | SD 1.5 default, batch overnight runs, cache by prompt+seed hash |
 | LLM returns malformed JSON | Schema in prompt, retry wrapper, summary-only fallback |
 | Hosted model ID deprecated by provider | Pin exact `org/model` in config and in the run manifest; a 404 fails loudly rather than silently substituting a different model |
@@ -520,10 +564,10 @@ Resolved: chapter-level scope and local single-user hosting — see Scope Decisi
 9. ~~Phase 4: assembly~~ — done, `weasyprint` for HTML->PDF (system Pango/Cairo/GDK-pixbuf
    dependency, not the originally-implied pure-Python path — see Phase 4). `book.pdf`
    assembled live from the 16 rendered pages.
-10. **Phase 5: quality & scale.** SDXL config, `Qwen-Image-Edit-2511` reference-image
-    conditioning for stronger character identity, batch/resume support, consistency
-    evaluation. `.cache/book/`, `.cache/images/`, and `.cache/memory.json` are all ready
-    fixtures to develop it against.
+10. ~~Phase 5, reference-image conditioning~~ — done, config-gated, limitations documented (see
+    Phase 5). **Phase 5, still open:** SDXL config, batch/resume support for long stories,
+    whole-book mode, consistency evaluation. `.cache/images_refs/` (the reference-conditioned
+    run) and `.cache/memory_refs.json` are ready fixtures to develop the rest against.
 
 `examples/short_story.txt` is no longer needed as the primary fixture — chapter 1 of a
 fetched Gutenberg book is a better one, since it's the actual input shape the product takes.

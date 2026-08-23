@@ -1,5 +1,7 @@
 """Offline tests for write-once entity extraction and the per-page scene record."""
 
+from pathlib import Path
+
 import httpx
 import pytest
 from openai import APIStatusError
@@ -64,6 +66,44 @@ def test_a_scene_record_is_always_written():
     assert len(scenes) == 1
     assert scenes[0].name == "page 2"
     assert scenes[0].description == PLAN.key_visual
+
+
+def test_a_new_sheet_remembers_this_pages_image_as_its_reference():
+    store = LocalStore()
+    image_path = Path("/tmp/ch001-page001.png")
+
+    update_memory(RecordingLLM(), store, FakeEmbedder(), PLAN, page_index=1, image_path=image_path)
+
+    assert store.get_by_name("Victor Frankenstein").reference_image == str(image_path)
+    assert store.get_by_name("the laboratory").reference_image == str(image_path)
+
+
+def test_a_known_characters_reference_image_is_not_overwritten():
+    store = LocalStore()
+    first_image = Path("/tmp/ch001-page001.png")
+    update_memory(RecordingLLM(), store, FakeEmbedder(), PLAN, page_index=1, image_path=first_image)
+
+    later_image = Path("/tmp/ch001-page002.png")
+    update_memory(RecordingLLM(), store, FakeEmbedder(), PLAN, page_index=2, image_path=later_image)
+
+    assert store.get_by_name("Victor Frankenstein").reference_image == str(first_image)
+
+
+def test_a_failed_render_leaves_reference_image_unset():
+    store = LocalStore()
+    update_memory(RecordingLLM(), store, FakeEmbedder(), PLAN, page_index=1, image_path=None)
+
+    assert store.get_by_name("Victor Frankenstein").reference_image is None
+
+
+def test_the_scene_records_reference_image_is_this_pages_image():
+    store = LocalStore()
+    image_path = Path("/tmp/ch001-page001.png")
+
+    written = update_memory(RecordingLLM(), store, FakeEmbedder(), PLAN, page_index=1, image_path=image_path)
+
+    scene = next(r for r in written if r.kind == "scene")
+    assert scene.reference_image == str(image_path)
 
 
 def test_an_api_error_is_not_swallowed():

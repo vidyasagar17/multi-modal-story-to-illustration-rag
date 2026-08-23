@@ -14,6 +14,13 @@ Two different fail-soft policies meet here, deliberately different:
   propagates to the caller, which stops the whole run there. A systemic quota problem isn't a
   page-local rendering hiccup. `update_memory` still runs even when the image itself failed —
   a character's sheet shouldn't be held hostage by one bad render.
+
+Reference-image conditioning (Phase 5): `context` (already fetched for the prompt) and
+`previous_scene` may carry a `reference_image` — an actual earlier render, not just a text
+description. `_collect_references()` gathers whichever exist (primary character, then the
+previous panel, then a setting) before the image call, so a recurring character's real
+likeness carries forward instead of being re-imagined from words each time. No reference
+images yet (the very first page of a run) means plain text-to-image, unchanged from Phase 3.
 """
 
 import time
@@ -50,10 +57,11 @@ def illustrate_page(
     context = retrieve(store, embedder, plan, previous_scene=previous_scene)
     prompt, negative = build_prompt(style_block, context, plan)
     seed = page_seed(base_seed, plan.characters)
+    references = _collect_references(context, previous_scene)
 
     image_path, error = None, None
     try:
-        image = illustrate(image_backend, prompt, negative, seed)
+        image = illustrate(image_backend, prompt, negative, seed, references)
         out_dir.mkdir(parents=True, exist_ok=True)
         # Chapter-qualified: `page_index` resets to 1 in every chapter, so the bare page
         # number alone collided across chapters and silently overwrote earlier renders —
@@ -63,7 +71,7 @@ def illustrate_page(
     except Exception as exc:  # noqa: BLE001 -- deliberately broad: plan.md's guiding constraint
         error = str(exc)  # is "a failed page produces a placeholder," not a narrower contract
 
-    written = update_memory(llm, store, embedder, plan, page_index=page_index)
+    written = update_memory(llm, store, embedder, plan, page_index=page_index, image_path=image_path)
     scene = next(record for record in written if record.kind == "scene")
 
     result = PageResult(
@@ -78,3 +86,23 @@ def illustrate_page(
         duration_s=time.monotonic() - started,
     )
     return result, scene
+
+
+def _collect_references(
+    context: list[MemoryRecord], previous_scene: MemoryRecord | None
+) -> list[Path]:
+    """Primary character's reference image, then the previous panel, then a setting's — the
+    same order an illustrator would reach for them. Deduplicated, capped at 3 (what
+    Qwen-Image-Edit-2511 accepts)."""
+    ordered = [record for record in context if record.kind == "character"]
+    if previous_scene is not None:
+        ordered.append(previous_scene)
+    ordered += [record for record in context if record.kind == "setting"]
+
+    seen: set[str] = set()
+    references: list[Path] = []
+    for record in ordered:
+        if record.reference_image and record.reference_image not in seen:
+            seen.add(record.reference_image)
+            references.append(Path(record.reference_image))
+    return references[:3]

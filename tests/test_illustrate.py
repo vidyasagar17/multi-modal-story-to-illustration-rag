@@ -1,5 +1,7 @@
 """Offline tests for seed discipline and the image-backend call."""
 
+from pathlib import Path
+
 from storyillus.agent.illustrate import illustrate, page_seed
 from storyillus.imagegen.fake import FakeImage
 
@@ -23,3 +25,21 @@ def test_illustrate_passes_prompt_negative_and_seed_to_the_backend():
     illustrate(backend, "a prompt", "a negative", 42)
 
     assert backend.calls == [("a prompt", "a negative", 42)]
+    assert backend.reference_calls == []  # no references given, no reference-mode call recorded
+
+
+def test_illustrate_with_no_references_behaves_like_plain_generation():
+    backend = FakeImage()
+    illustrate(backend, "a prompt", "a negative", 42, references=[])
+
+    assert backend.calls == [("a prompt", "a negative", 42)]
+    assert backend.reference_calls == []
+
+
+def test_illustrate_with_references_records_a_reference_call():
+    backend = FakeImage()
+    refs = [Path("/tmp/victor.png"), Path("/tmp/previous_page.png")]
+
+    illustrate(backend, "a prompt", "a negative", 42, references=refs)
+
+    assert backend.reference_calls == [("a prompt", "a negative", 42, tuple(refs))]

@@ -78,6 +78,7 @@ class MemoryRecord:
     description: str
     first_seen_page: int
     embedding_text: str
+    reference_image: str | None = None
 
 
 @dataclass

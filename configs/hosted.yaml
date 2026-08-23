@@ -10,8 +10,7 @@ llm:
   max_tokens: 1024
 
 image:
-  # Apache 2.0, text-to-image. Qwen-Image-Edit-2511 (reference-conditioned, stronger
-  # character identity) is Phase 5's job — it only supports image-to-image, verified live.
+  # Apache 2.0, text-to-image — used for the very first page, before any reference exists.
   backend: huggingface
   model_id: Qwen/Qwen-Image
   token_env: hf_token
@@ -19,6 +18,9 @@ image:
   guidance: 4.0
   width: 1024
   height: 1024
+  # Image-to-image, up to 3 reference images: a character's own earlier render, the previous
+  # page, a setting's. Used automatically once any reference exists; Phase 5.
+  edit_model_id: Qwen/Qwen-Image-Edit-2511
 
 # Base seed for the run; per-character offsets are added to it.
 seed: 20260809
