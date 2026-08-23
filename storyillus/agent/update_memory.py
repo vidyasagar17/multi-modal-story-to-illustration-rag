@@ -9,7 +9,14 @@ of a real change" is its own judgment call that deserves its own evidence, not a
 Settings are deduped by exact name, the same as characters, not by a similarity threshold on
 write — `retrieve.py`'s semantic search is still how a differently-phrased mention of the same
 place gets found later; this is only about not writing a redundant sheet.
+
+`image_path` — this page's own rendered image (or `None` if it failed) — becomes a new
+character/setting's `reference_image`: no separate "generate a clean portrait" step, the page
+they first appear on already is their reference photo. It also becomes the scene record's
+reference, which is what the *next* page conditions on for continuity (Phase 5).
 """
+
+from pathlib import Path
 
 from storyillus.llm.base import LLMBackend
 from storyillus.memory.embedder import Embedder
@@ -37,22 +44,27 @@ def update_memory(
     plan: ScenePlan,
     *,
     page_index: int,
+    image_path: Path | None = None,
 ) -> list[MemoryRecord]:
     """Write a sheet for every character/setting in `plan` not already known, plus a scene note."""
     written = []
 
     for name in plan.characters:
         if store.get_by_name(name) is None:
-            sheet = _write_sheet(llm, store, embedder, kind="character", name=name, plan=plan, page_index=page_index)
+            sheet = _write_sheet(
+                llm, store, embedder, kind="character", name=name, plan=plan,
+                page_index=page_index, image_path=image_path,
+            )
             written.append(sheet)
 
     if plan.setting and store.get_by_name(plan.setting) is None:
         sheet = _write_sheet(
-            llm, store, embedder, kind="setting", name=plan.setting, plan=plan, page_index=page_index
+            llm, store, embedder, kind="setting", name=plan.setting, plan=plan,
+            page_index=page_index, image_path=image_path,
         )
         written.append(sheet)
 
-    written.append(_write_scene(store, embedder, plan=plan, page_index=page_index))
+    written.append(_write_scene(store, embedder, plan=plan, page_index=page_index, image_path=image_path))
     return written
 
 
@@ -65,6 +77,7 @@ def _write_sheet(
     name: str,
     plan: ScenePlan,
     page_index: int,
+    image_path: Path | None,
 ) -> MemoryRecord:
     description = llm.complete(
         PROMPT.format(summary=plan.summary, key_visual=plan.key_visual, name=name), system=SYSTEM
@@ -75,18 +88,22 @@ def _write_sheet(
         description=description,
         first_seen_page=page_index,
         embedding_text=f"{name}: {description}",
+        reference_image=str(image_path) if image_path else None,
     )
     store.add(record, embedder.embed(record.embedding_text))
     return record
 
 
-def _write_scene(store: VectorStore, embedder: Embedder, *, plan: ScenePlan, page_index: int) -> MemoryRecord:
+def _write_scene(
+    store: VectorStore, embedder: Embedder, *, plan: ScenePlan, page_index: int, image_path: Path | None
+) -> MemoryRecord:
     record = MemoryRecord(
         kind="scene",
         name=f"page {page_index}",
         description=plan.key_visual,
         first_seen_page=page_index,
         embedding_text=plan.key_visual,
+        reference_image=str(image_path) if image_path else None,
     )
     store.add(record, embedder.embed(record.embedding_text))
     return record

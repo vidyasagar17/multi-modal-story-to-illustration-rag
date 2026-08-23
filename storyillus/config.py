@@ -35,7 +35,12 @@ class LLMConfig:
 
 @dataclass(frozen=True)
 class ImageConfig:
-    """A text-to-image model, hosted or local."""
+    """A text-to-image model, hosted or local.
+
+    `edit_model_id` is a second, optional model: one that paints *from reference images* (a
+    character's own earlier render, the previous page) instead of from text alone. Left unset,
+    every page falls back to plain text-to-image — the same behavior Phase 3/4 already shipped.
+    """
 
     backend: str
     model_id: str
@@ -44,6 +49,7 @@ class ImageConfig:
     guidance: float = 4.0
     width: int = 1024
     height: int = 1024
+    edit_model_id: str | None = None
     token: str | None = None
 
 
