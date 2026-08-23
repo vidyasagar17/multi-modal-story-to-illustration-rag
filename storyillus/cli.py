@@ -26,6 +26,7 @@ from storyillus.memory.embedder import Embedder
 from storyillus.memory.local_embedder import SentenceTransformerEmbedder
 from storyillus.memory.store import LocalStore, VectorStore
 from storyillus.models import Book, Chapter, MemoryRecord, Page, PageResult, ScenePlan
+from storyillus.render.book import render_book
 
 
 def fetch(args: argparse.Namespace) -> int:
@@ -246,10 +247,17 @@ def _remember_document(
 
 
 def illustrate(args: argparse.Namespace) -> int:
-    """Render every page in a canonicalized document: the full retrieve/prompt/image/memory loop."""
+    """Render every page in a canonicalized document: the full retrieve/prompt/image/memory loop.
+
+    `--pages` re-renders only the named pages against an existing store — a deliberate
+    simplification, not a full replay: continuity (`previous_scene`) is only threaded between
+    pages actually processed in *this* invocation, so a filtered run loses continuity with
+    whatever was skipped. Fine for a one-off touch-up; a full run has no such gap.
+    """
     try:
         document = json.loads(Path(args.plans).read_text(encoding="utf-8"))
         settings = config.load(args.config)
+        pages = _parse_pages(args.pages) if args.pages else None
     except (OSError, ValueError, config.ConfigError) as error:
         print(error, file=sys.stderr)
         return 1
@@ -273,13 +281,28 @@ def illustrate(args: argparse.Namespace) -> int:
     style_block = get_or_create_style_block(llm, store, embedder, all_plans)
 
     results, stopped = _illustrate_document(
-        document, llm, image_backend, store, embedder, style_block, base_seed=settings.seed, out_dir=out_dir
+        document,
+        llm,
+        image_backend,
+        store,
+        embedder,
+        style_block,
+        base_seed=settings.seed,
+        out_dir=out_dir,
+        pages=pages,
     )
     store.persist(store_path)
+
+    manifest_path = out_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(_build_manifest(results, settings), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
     rendered = [r for r in results if r.error is None]
     failed = [r for r in results if r.error is not None]
     print(f"Rendered {len(rendered)}/{len(results)} pages to {out_dir}", file=sys.stderr)
+    print(f"Wrote {manifest_path}", file=sys.stderr)
     for result in failed:
         print(f"  page {result.page.index}: {result.error}", file=sys.stderr)
 
@@ -299,16 +322,20 @@ def _illustrate_document(
     *,
     base_seed: int,
     out_dir: Path,
+    pages: set[int] | None = None,
 ) -> tuple[list[PageResult], APIStatusError | None]:
     """Run `illustrate_page` over every page across every chapter, threading `previous_scene`.
 
     A depleted LLM quota (inside `update_memory`) stops the run, but whatever was already
-    rendered stays — the same fail-soft posture as `_plan_pages`.
+    rendered stays — the same fail-soft posture as `_plan_pages`. `pages`, if given, skips any
+    page whose index isn't in it (see `illustrate()`'s docstring on the continuity trade-off).
     """
     results: list[PageResult] = []
     previous_scene: MemoryRecord | None = None
     for chapter in document["chapters"]:
         for page in chapter["pages"]:
+            if pages is not None and page["index"] not in pages:
+                continue
             plan = ScenePlan(**page["plan"])
             try:
                 result, previous_scene = illustrate_page(
@@ -328,6 +355,57 @@ def _illustrate_document(
                 return results, error
             results.append(result)
     return results, None
+
+
+def _parse_pages(spec: str) -> set[int]:
+    """Turn `"3"`, `"1-3"`, or `"1,4,7-9"` into a set of page numbers."""
+    pages: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        start, separator, end = part.partition("-")
+        try:
+            low = int(start)
+            high = int(end) if separator else low
+        except ValueError:
+            raise ValueError(f"{part!r} is not a page number or range like '3' or '1-3'") from None
+        pages.update(range(low, high + 1))
+    if not pages:
+        raise ValueError("no pages selected")
+    return pages
+
+
+def _build_manifest(results: list[PageResult], settings: config.Config) -> list[dict[str, Any]]:
+    """One entry per rendered page: model IDs, seed, prompts, timing — enough to reproduce it."""
+    return [
+        {
+            "page_index": result.page.index,
+            "llm_model": settings.llm.model_id,
+            "image_model": settings.image.model_id,
+            "seed": result.seed,
+            "image_prompt": result.image_prompt,
+            "negative_prompt": result.negative_prompt,
+            "image_path": str(result.image_path) if result.image_path else None,
+            "error": result.error,
+            "duration_s": round(result.duration_s, 2),
+        }
+        for result in results
+    ]
+
+
+def render(args: argparse.Namespace) -> int:
+    """Assemble a canonicalized document's pages and rendered images into an HTML book and PDF."""
+    try:
+        document = json.loads(Path(args.plans).read_text(encoding="utf-8"))
+    except OSError as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    html_path, pdf_path = render_book(document, Path(args.images_dir), Path(args.out_dir))
+    print(f"Wrote {html_path}", file=sys.stderr)
+    print(f"Wrote {pdf_path}", file=sys.stderr)
+    return 0
 
 
 def _load_chapters(path: Path, select: str | None) -> list[Chapter]:
@@ -429,7 +507,18 @@ def main() -> int:
     illustrate_parser.add_argument(
         "--out-dir", default=".cache/images", help="where rendered pages are written"
     )
+    illustrate_parser.add_argument(
+        "--pages", metavar="SPEC", help="re-render only these pages, e.g. '3', '1-3,7' (default: all)"
+    )
     illustrate_parser.set_defaults(handler=illustrate)
+
+    render_parser = subparsers.add_parser(
+        "render", help="assemble pages and rendered images into an HTML book and PDF"
+    )
+    render_parser.add_argument("plans", help="path to a canonicalized JSON document")
+    render_parser.add_argument("--images-dir", default=".cache/images", help="where rendered pages live")
+    render_parser.add_argument("--out-dir", default=".cache/book", help="where the book is written")
+    render_parser.set_defaults(handler=render)
 
     args = parser.parse_args()
     return args.handler(args)

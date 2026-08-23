@@ -10,6 +10,7 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
     "sentence-transformers>=6.0.0",
+    "weasyprint>=69.0",
 ]
 
 [project.scripts]

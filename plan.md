@@ -65,7 +65,7 @@ storyillus/
     update_memory.py   # DONE: step 5: write-once entity extraction + scene record
     graph.py           # DONE: orchestration wiring steps 2-5 per page
   render/
-    book.py            # assemble pages + images into HTML and PDF
+    book.py            # DONE: assemble pages + images into HTML and PDF (weasyprint)
   api/
     server.py          # FastAPI: search, fetch, submit run, poll status, serve book
     jobs.py            # run registry on disk; illustration is a background job
@@ -396,16 +396,46 @@ rather than a folder the user has to fill themselves.
   matching the story's tone) and reused across every page. Spot-checked `ch005-page001.png`:
   a coherent, evocative painterly image consistent with the generated style block.
 
-### Phase 3 — Image generation
-- Diffusers backend (SD 1.5 first — fastest to iterate), prompt builder that fuses style
-  block + retrieved context + `key_visual`, negative prompt defaults.
-- **Done when:** the full five-step loop renders every page of the example story.
-
 ### Phase 4 — Assembly
-- HTML book renderer (text page + facing illustration), PDF export.
-- Run manifest JSON: model IDs, seeds, prompts, timings per page.
-- `--pages 3,7` flag to re-render individual pages against an existing run.
-- **Done when:** one command turns `examples/short_story.txt` into a viewable PDF.
+- DONE: `render/book.py` — `build_book_html()` + `render_book()`. One `<section>` per page,
+  condensed text (`ScenePlan.summary`) facing its illustration, `page-break-after: always` so
+  each section is one PDF page. Illustrations are copied into `<out_dir>/images/` rather than
+  referenced by absolute path, so the whole output directory is one self-contained, movable
+  folder. CLI: `uv run storyillus render <canonical.json> --images-dir .cache/images --out-dir
+  .cache/book`.
+- DONE: run manifest JSON, added to the already-shipped `illustrate` command (Phase 3) rather
+  than as a separate pass — the per-page data (model IDs, seed, prompts, timing) only exists
+  inside that command's loop. `PageResult` gained a `duration_s` field, timed in
+  `graph.illustrate_page()` around the whole retrieve→prompt→image→memory sequence.
+- DONE: `--pages 3,7` on `illustrate` (`_parse_pages()`, supports single numbers and ranges).
+  **A deliberate simplification, not a full replay:** it filters which pages are processed,
+  but `previous_scene` continuity is only threaded between pages actually processed in *that*
+  invocation — a filtered run has gaps in continuity that a full run doesn't. Documented in
+  `illustrate()`'s docstring; fine for a one-off touch-up render, not for the primary run.
+- **`weasyprint` needs Pango/Cairo/GDK-pixbuf as system libraries, not just the Python
+  package.** On this Apple Silicon Mac, Homebrew installs them under `/opt/homebrew`, which
+  the dynamic linker doesn't search by default — `from weasyprint import HTML` failed at
+  import with a `dlopen` error naming `libpango` until `brew install pango gdk-pixbuf` (cairo
+  and glib were already present) and `DYLD_LIBRARY_PATH` was set. Verified that setting it at
+  Python runtime, before the `weasyprint` import — not just in the shell beforehand — actually
+  works, so `render/book.py` does this itself (`os.environ.setdefault`, guarded to macOS, tries
+  `/opt/homebrew/lib` then `/usr/local/lib`): no shell configuration required of whoever runs
+  this.
+- **`weasyprint` chosen over `xhtml2pdf` for visual quality**, not just to match `plan.md`'s
+  original text — this is an illustrated-book renderer, where a modern CSS engine (flexbox,
+  precise image sizing, real page-break control) matters more than it would for a plain text
+  report. The system-dependency cost was worth confirming works before committing to it.
+- **Done when:** ✅ one command turns a canonicalized document into a viewable PDF.
+- **Verified:** `env -u hf_token uv run pytest -q` — 138 passed. `uv run ruff check .` clean.
+  Live run against `.cache/ch5-6-canonical.json` + the 16 already-rendered images: wrote a
+  17MB `book.pdf` (`%PDF-1.7`, 16 pages) and `book.html` (16 `<section class="page">`s, 16
+  embedded `<img>` tags), plus a self-contained `images/` copy. Live-tested `--pages 1`
+  (re-rendered just page 1 of both chapters, 2 images) and confirmed `manifest.json` correctly
+  captured both models' IDs, per-page seeds, full prompts (style + every retrieved context
+  description + key visual), and render duration.
+- `examples/short_story.txt` still doesn't exist and isn't needed — `.cache/ch5-6-canonical.json`
+  + `.cache/images/` (the same fixtures used since Phase 2) are the actual input shape and cost
+  no new tokens to develop against.
 
 ### Phase 5 — Quality & scale
 - SDXL config, optional IP-Adapter / reference-image conditioning for stronger character
@@ -487,9 +517,13 @@ Resolved: chapter-level scope and local single-user hosting — see Scope Decisi
 8. ~~Phase 3: image generation~~ — done, hosted-only (`Qwen/Qwen-Image` via
    `huggingface_hub.InferenceClient`, not the originally-proposed SD 1.5/diffusers — see
    Phase 3). 16/16 pages of the ch5-6 fixture rendered live.
-9. **Phase 4: assembly.** HTML book renderer (text page + facing illustration), PDF export,
-   run manifest JSON. `.cache/images/` (16 rendered pages) and `.cache/memory.json` are both
-   ready fixtures to develop it against at zero additional cost.
+9. ~~Phase 4: assembly~~ — done, `weasyprint` for HTML->PDF (system Pango/Cairo/GDK-pixbuf
+   dependency, not the originally-implied pure-Python path — see Phase 4). `book.pdf`
+   assembled live from the 16 rendered pages.
+10. **Phase 5: quality & scale.** SDXL config, `Qwen-Image-Edit-2511` reference-image
+    conditioning for stronger character identity, batch/resume support, consistency
+    evaluation. `.cache/book/`, `.cache/images/`, and `.cache/memory.json` are all ready
+    fixtures to develop it against.
 
 `examples/short_story.txt` is no longer needed as the primary fixture — chapter 1 of a
 fetched Gutenberg book is a better one, since it's the actual input shape the product takes.

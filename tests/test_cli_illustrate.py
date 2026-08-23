@@ -1,9 +1,11 @@
 """Offline tests for illustrating a whole document: continuity and fail-soft-at-the-run-level."""
 
 import httpx
+import pytest
 from openai import APIStatusError
 
-from storyillus.cli import _illustrate_document
+from storyillus.cli import _build_manifest, _illustrate_document, _parse_pages
+from storyillus.config import Config, ImageConfig, LLMConfig
 from storyillus.imagegen.fake import FakeImage
 from storyillus.memory.fake import FakeEmbedder
 from storyillus.memory.store import LocalStore
@@ -95,3 +97,67 @@ def test_a_mid_run_api_error_stops_but_keeps_earlier_results(tmp_path):
 
     assert stopped is not None
     assert len(results) == 1  # chapter 5 finished before chapter 6 hit the failure
+
+
+THREE_PAGE_CHAPTER = {
+    "chapters": [
+        {
+            "index": 1,
+            "pages": [
+                {"index": i, "plan": {"summary": f"page {i}", "characters": [], "setting": "s", "mood": "m", "key_visual": "k"}}
+                for i in (1, 2, 3)
+            ],
+        }
+    ]
+}
+
+
+def test_pages_keeps_only_the_named_indices(tmp_path):
+    results, _ = _illustrate_document(
+        THREE_PAGE_CHAPTER, RecordingLLM(), FakeImage(), LocalStore(), FakeEmbedder(), "a style",
+        base_seed=1000, out_dir=tmp_path, pages={1, 3},
+    )
+
+    assert [result.page.index for result in results] == [1, 3]
+
+
+def test_pages_excludes_indices_not_named(tmp_path):
+    results, _ = _illustrate_document(
+        DOCUMENT, RecordingLLM(), FakeImage(), LocalStore(), FakeEmbedder(), "a style",
+        base_seed=1000, out_dir=tmp_path, pages={99},
+    )
+
+    assert results == []
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"), [("3", {3}), ("1-3", {1, 2, 3}), ("1,4,7-9", {1, 4, 7, 8, 9})]
+)
+def test_parse_pages_handles_singles_and_ranges(spec, expected):
+    assert _parse_pages(spec) == expected
+
+
+def test_parse_pages_rejects_garbage():
+    with pytest.raises(ValueError, match="not a page number"):
+        _parse_pages("abc")
+
+
+def test_build_manifest_captures_model_ids_seed_and_prompts(tmp_path):
+    results, _ = _illustrate_document(
+        DOCUMENT, RecordingLLM(), FakeImage(), LocalStore(), FakeEmbedder(), "a style",
+        base_seed=1000, out_dir=tmp_path,
+    )
+    settings = Config(
+        name="test",
+        llm=LLMConfig(base_url="http://x", model_id="test-llm"),
+        image=ImageConfig(backend="huggingface", model_id="test-image"),
+    )
+
+    manifest = _build_manifest(results, settings)
+
+    assert len(manifest) == 2
+    assert manifest[0]["llm_model"] == "test-llm"
+    assert manifest[0]["image_model"] == "test-image"
+    assert manifest[0]["seed"] == results[0].seed
+    assert manifest[0]["image_prompt"] == results[0].image_prompt
+    assert manifest[0]["image_path"] is not None
