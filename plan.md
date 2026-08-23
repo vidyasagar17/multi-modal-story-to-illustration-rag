@@ -291,10 +291,35 @@ rather than a folder the user has to fill themselves.
   input and 3.0k output tokens for the run, well under a cent at cheap-provider rates.
 
 ### Phase 2 — Memory layer
+- DONE: `agent/canonicalize.py` — `canonicalize_names()` / `apply_canonical_names()`. One
+  `complete_json` call per document, same schema-in-prompt/fail-soft pattern as `condense.py`.
+  CLI: `uv run storyillus canonicalize <plans.json> --config configs/hosted.yaml`.
+- **Context is every summary a name co-occurs with, not just the first.** The first cut used
+  each name's first-seen summary as disambiguating context and misgrouped `the narrator's
+  mother` into `Elizabeth Lavenza` — the name's first appearance was in a scene summary about
+  the peasant girl who later turns out to be Elizabeth, so the model had no real description of
+  the mother to anchor on, only proximity. Passing every distinct summary a name appears
+  alongside fixed that case. Found by running against the live `.cache/ch5-6-plans.json`
+  fixture, not by the unit tests, which use short scripted data where the bug can't surface.
+- **Known limitation: a name mentioned once, in passing, can still misresolve.** After the
+  fix above, `his wife` (an unnamed peasant's wife, mentioned once) merged into `Caroline
+  Beaufort` instead of the peasant family it actually belonged to. All *recurring* named
+  characters — the ones name-keyed retrieval actually needs to hold steady — resolved
+  correctly. Background one-off characters are the residual risk. Not worth chasing further
+  without more evidence; revisit if it bites a book where minor characters recur under vague
+  references.
 - Embedder, `VectorStore` protocol, Chroma implementation only, record schema.
-- `update_memory.py` entity extraction + `retrieve.py` scoped retrieval.
+- `update_memory.py` entity extraction (built on `canonicalize_names`) + `retrieve.py` scoped
+  retrieval.
 - **Done when:** running Phase 1b over a story populates a store where querying a
   character's name returns that character's sheet as the top hit.
+- **Verified:** `env -u hf_token uv run pytest -q` — 95 passed. `uv run ruff check .` clean.
+  Live run against `.cache/ch5-6-plans.json` (Frankenstein ch1-2 / catalog ch5-6) against
+  `Qwen/Qwen3-235B-A22B-Instruct-2507`: 20 raw names, 34 mentions, collapsed to 8 canonical
+  people — `Victor`/`I`/`the narrator`/`the young man` → `Victor Frankenstein`;
+  `Elizabeth` → `Elizabeth Lavenza`; `Clerval` → `Henry Clerval`; `my father`/`Victor's
+  father`/`father` → `Victor's father`; `my mother`/`his wife`/`the narrator's mother` →
+  `Caroline Beaufort`.
 
 ### Phase 3 — Image generation
 - Diffusers backend (SD 1.5 first — fastest to iterate), prompt builder that fuses style
@@ -380,12 +405,10 @@ Resolved: chapter-level scope and local single-user hosting — see Scope Decisi
 4. ~~`condense.py` + the `openai_compat` backend, verified against a live call~~ — done.
 5. ~~`paginate.py`~~ — done. A 300-word target gives pages a `ScenePlan` can describe without
    the model having to pick between two unrelated moments.
-6. **Phase 2: name canonicalisation before the vector store.** The live run returned 20
-   character names for about 6 people. Whatever `update_memory.py` writes has to resolve
-   aliases and first-person references to one canonical name, or name-keyed retrieval
-   returns three partial sheets for Victor instead of one complete one.
-7. **`memory/` — embedder, `VectorStore` protocol, Chroma.** Phase 2 proper. The 16 plans in
-   `.cache/ch5-6-plans.json` are the fixture to develop it against, so it costs no tokens.
+6. ~~Phase 2: name canonicalisation before the vector store~~ — done. See Phase 2 above.
+7. **`memory/` — embedder, `VectorStore` protocol, Chroma.** Phase 2 proper, next up. The 16
+   plans in `.cache/ch5-6-plans.json` — now also `.cache/ch5-6-canonical.json` with names
+   resolved — are the fixture to develop it against, so it costs no tokens.
 
 `examples/short_story.txt` is no longer needed as the primary fixture — chapter 1 of a
 fetched Gutenberg book is a better one, since it's the actual input shape the product takes.

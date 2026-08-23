@@ -10,12 +10,14 @@ from typing import Any
 from openai import APIStatusError
 
 from storyillus import config
+from storyillus.agent.canonicalize import apply_canonical_names, canonicalize_names
 from storyillus.agent.condense import condense
 from storyillus.ingest import chapters as chapters_mod
 from storyillus.ingest import gutenberg
 from storyillus.ingest.paginate import TARGET_WORDS, paginate
+from storyillus.llm.base import LLMBackend
 from storyillus.llm.openai_compat import OpenAICompatLLM
-from storyillus.models import Book, Chapter, Page
+from storyillus.models import Book, Chapter, Page, ScenePlan
 
 
 def fetch(args: argparse.Namespace) -> int:
@@ -136,6 +138,47 @@ def _plan_pages(
     return planned, None
 
 
+def canonicalize(args: argparse.Namespace) -> int:
+    """Collapse alias/first-person/possessive character references in a `plan` document."""
+    try:
+        document = json.loads(Path(args.plans).read_text(encoding="utf-8"))
+        settings = config.load(args.config)
+    except (OSError, ValueError, config.ConfigError) as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    llm = OpenAICompatLLM(settings.llm)
+    print(f"Canonicalizing with {settings.llm.model_id}", file=sys.stderr)
+
+    before = sum(len(p["plan"].get("characters") or []) for c in document["chapters"] for p in c["pages"])
+    mapping = _canonicalize_document(document, llm)
+    after = len(set(mapping.values()))
+    print(f"{len(mapping)} raw names ({before} mentions) -> {after} canonical names", file=sys.stderr)
+
+    text = json.dumps(document, indent=2, ensure_ascii=False)
+    if args.out:
+        Path(args.out).write_text(text + "\n", encoding="utf-8")
+        print(f"Wrote {args.out}", file=sys.stderr)
+    else:
+        print(text)
+    return 0
+
+
+def _canonicalize_document(document: dict[str, Any], llm: LLMBackend) -> dict[str, str]:
+    """Canonicalize every page's characters across every chapter, in place. Returns the mapping."""
+    pages = [(chapter, page) for chapter in document["chapters"] for page in chapter["pages"]]
+    plans = [ScenePlan(**page["plan"]) for _, page in pages]
+
+    mapping = canonicalize_names(llm, plans)
+    rewritten = apply_canonical_names(plans, mapping)
+
+    for (_, page), plan in zip(pages, rewritten, strict=True):
+        page["plan"]["characters"] = plan.characters
+
+    document["canonical_names"] = mapping
+    return mapping
+
+
 def _load_chapters(path: Path, select: str | None) -> list[Chapter]:
     found = chapters_mod.split_chapters(path.read_text(encoding="utf-8"))
     if not found:
@@ -205,6 +248,14 @@ def main() -> int:
     )
     plan_parser.add_argument("--out", help="write JSON here instead of stdout")
     plan_parser.set_defaults(handler=plan)
+
+    canon_parser = subparsers.add_parser(
+        "canonicalize", help="collapse alias/first-person references in a `plan` document"
+    )
+    canon_parser.add_argument("plans", help="path to a JSON document written by `plan`")
+    canon_parser.add_argument("--config", default="configs/hosted.yaml", help="config to run with")
+    canon_parser.add_argument("--out", help="write JSON here instead of stdout")
+    canon_parser.set_defaults(handler=canonicalize)
 
     args = parser.parse_args()
     return args.handler(args)
