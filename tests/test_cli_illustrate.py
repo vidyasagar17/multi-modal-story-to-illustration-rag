@@ -1,0 +1,97 @@
+"""Offline tests for illustrating a whole document: continuity and fail-soft-at-the-run-level."""
+
+import httpx
+from openai import APIStatusError
+
+from storyillus.cli import _illustrate_document
+from storyillus.imagegen.fake import FakeImage
+from storyillus.memory.fake import FakeEmbedder
+from storyillus.memory.store import LocalStore
+
+DOCUMENT = {
+    "chapters": [
+        {
+            "index": 5,
+            "pages": [
+                {
+                    "index": 1,
+                    "plan": {
+                        "summary": "Victor is introduced.",
+                        "characters": ["Victor Frankenstein"],
+                        "setting": "Geneva",
+                        "mood": "warm",
+                        "key_visual": "A young man reads by a window.",
+                    },
+                },
+            ],
+        },
+        {
+            "index": 6,
+            "pages": [
+                {
+                    "index": 1,
+                    "plan": {
+                        "summary": "Victor and Elizabeth walk together.",
+                        "characters": ["Victor Frankenstein", "Elizabeth Lavenza"],
+                        "setting": "Geneva",
+                        "mood": "tender",
+                        "key_visual": "Two figures walk along a lake shore.",
+                    },
+                },
+            ],
+        },
+    ]
+}
+
+
+class RecordingLLM:
+    def complete(self, prompt: str, *, system: str | None = None) -> str:
+        return "A tall figure."
+
+
+def test_continuity_threads_across_chapters(tmp_path):
+    store = LocalStore()
+    results, stopped = _illustrate_document(
+        DOCUMENT, RecordingLLM(), FakeImage(), store, FakeEmbedder(), "a style",
+        base_seed=1000, out_dir=tmp_path,
+    )
+
+    assert stopped is None
+    assert len(results) == 2
+    # chapter 6's page retrieved chapter 5's scene as continuity context
+    ch6_context_kinds = [record.kind for record in results[1].retrieved]
+    assert "scene" in ch6_context_kinds
+
+
+def test_pages_sharing_the_same_index_across_chapters_do_not_collide_on_disk(tmp_path):
+    """Both chapters' first page is index 1 — the saved files must not overwrite each other."""
+    results, _ = _illustrate_document(
+        DOCUMENT, RecordingLLM(), FakeImage(), LocalStore(), FakeEmbedder(), "a style",
+        base_seed=1000, out_dir=tmp_path,
+    )
+
+    paths = [result.image_path for result in results]
+    assert len(set(paths)) == len(paths) == 2
+    assert all(path.exists() for path in paths)
+
+
+def test_a_mid_run_api_error_stops_but_keeps_earlier_results(tmp_path):
+    class FailingAfterOneLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, prompt: str, *, system: str | None = None) -> str:
+            self.calls += 1
+            if self.calls > 2:  # chapter 5 writes 2 sheets (Victor, Geneva); the 3rd call is Elizabeth's
+                response = httpx.Response(402, request=httpx.Request("POST", "https://router.example/v1"))
+                raise APIStatusError("out of credits", response=response, body=None)
+            return "A tall figure."
+
+    store = LocalStore()
+    results, stopped = _illustrate_document(
+        DOCUMENT, FailingAfterOneLLM(), FakeImage(), store, FakeEmbedder(), "a style",
+        base_seed=1000, out_dir=tmp_path,
+    )
+
+    assert stopped is not None
+    assert len(results) == 1  # chapter 5 finished before chapter 6 hit the failure

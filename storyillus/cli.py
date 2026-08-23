@@ -12,7 +12,11 @@ from openai import APIStatusError
 from storyillus import config
 from storyillus.agent.canonicalize import apply_canonical_names, canonicalize_names
 from storyillus.agent.condense import condense
+from storyillus.agent.graph import illustrate_page
+from storyillus.agent.style import get_or_create_style_block
 from storyillus.agent.update_memory import update_memory
+from storyillus.imagegen.base import ImageBackend
+from storyillus.imagegen.huggingface import HFImageBackend
 from storyillus.ingest import chapters as chapters_mod
 from storyillus.ingest import gutenberg
 from storyillus.ingest.paginate import TARGET_WORDS, paginate
@@ -21,7 +25,7 @@ from storyillus.llm.openai_compat import OpenAICompatLLM
 from storyillus.memory.embedder import Embedder
 from storyillus.memory.local_embedder import SentenceTransformerEmbedder
 from storyillus.memory.store import LocalStore, VectorStore
-from storyillus.models import Book, Chapter, MemoryRecord, Page, ScenePlan
+from storyillus.models import Book, Chapter, MemoryRecord, Page, PageResult, ScenePlan
 
 
 def fetch(args: argparse.Namespace) -> int:
@@ -241,6 +245,91 @@ def _remember_document(
     return written, None
 
 
+def illustrate(args: argparse.Namespace) -> int:
+    """Render every page in a canonicalized document: the full retrieve/prompt/image/memory loop."""
+    try:
+        document = json.loads(Path(args.plans).read_text(encoding="utf-8"))
+        settings = config.load(args.config)
+    except (OSError, ValueError, config.ConfigError) as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    if settings.image.backend != "huggingface":
+        print(
+            f"Unsupported image backend: {settings.image.backend!r} (only 'huggingface' exists so far)",
+            file=sys.stderr,
+        )
+        return 1
+
+    llm = OpenAICompatLLM(settings.llm)
+    image_backend = HFImageBackend(settings.image)
+    embedder = SentenceTransformerEmbedder()
+    store_path = Path(args.store)
+    store = LocalStore.load(store_path)
+    out_dir = Path(args.out_dir)
+    print(f"Illustrating with {settings.image.model_id}, store at {store_path}", file=sys.stderr)
+
+    all_plans = [ScenePlan(**page["plan"]) for c in document["chapters"] for page in c["pages"]]
+    style_block = get_or_create_style_block(llm, store, embedder, all_plans)
+
+    results, stopped = _illustrate_document(
+        document, llm, image_backend, store, embedder, style_block, base_seed=settings.seed, out_dir=out_dir
+    )
+    store.persist(store_path)
+
+    rendered = [r for r in results if r.error is None]
+    failed = [r for r in results if r.error is not None]
+    print(f"Rendered {len(rendered)}/{len(results)} pages to {out_dir}", file=sys.stderr)
+    for result in failed:
+        print(f"  page {result.page.index}: {result.error}", file=sys.stderr)
+
+    if stopped:
+        print(f"\n{stopped.status_code} from {settings.llm.base_url}", file=sys.stderr)
+        print(_explain(stopped), file=sys.stderr)
+    return 1 if stopped else 0
+
+
+def _illustrate_document(
+    document: dict[str, Any],
+    llm: LLMBackend,
+    image_backend: ImageBackend,
+    store: VectorStore,
+    embedder: Embedder,
+    style_block: str,
+    *,
+    base_seed: int,
+    out_dir: Path,
+) -> tuple[list[PageResult], APIStatusError | None]:
+    """Run `illustrate_page` over every page across every chapter, threading `previous_scene`.
+
+    A depleted LLM quota (inside `update_memory`) stops the run, but whatever was already
+    rendered stays — the same fail-soft posture as `_plan_pages`.
+    """
+    results: list[PageResult] = []
+    previous_scene: MemoryRecord | None = None
+    for chapter in document["chapters"]:
+        for page in chapter["pages"]:
+            plan = ScenePlan(**page["plan"])
+            try:
+                result, previous_scene = illustrate_page(
+                    llm,
+                    image_backend,
+                    store,
+                    embedder,
+                    plan,
+                    chapter_index=chapter["index"],
+                    page_index=page["index"],
+                    style_block=style_block,
+                    base_seed=base_seed,
+                    previous_scene=previous_scene,
+                    out_dir=out_dir,
+                )
+            except APIStatusError as error:
+                return results, error
+            results.append(result)
+    return results, None
+
+
 def _load_chapters(path: Path, select: str | None) -> list[Chapter]:
     found = chapters_mod.split_chapters(path.read_text(encoding="utf-8"))
     if not found:
@@ -328,6 +417,19 @@ def main() -> int:
         "--store", default=".cache/memory.json", help="where the memory store lives"
     )
     remember_parser.set_defaults(handler=remember)
+
+    illustrate_parser = subparsers.add_parser(
+        "illustrate", help="render every page: retrieve, prompt, image, memory update"
+    )
+    illustrate_parser.add_argument("plans", help="path to a canonicalized JSON document")
+    illustrate_parser.add_argument("--config", default="configs/hosted.yaml", help="config to run with")
+    illustrate_parser.add_argument(
+        "--store", default=".cache/memory.json", help="where the memory store lives"
+    )
+    illustrate_parser.add_argument(
+        "--out-dir", default=".cache/images", help="where rendered pages are written"
+    )
+    illustrate_parser.set_defaults(handler=illustrate)
 
     args = parser.parse_args()
     return args.handler(args)
