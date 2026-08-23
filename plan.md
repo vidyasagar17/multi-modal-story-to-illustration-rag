@@ -47,7 +47,8 @@ storyillus/
   imagegen/
     base.py            # DONE: ImageBackend protocol: generate(prompt, negative, seed) -> PIL
     fake.py            # DONE: FakeImage — flat colour keyed by seed
-    diffusers_local.py # Z-Image Turbo / SDXL via diffusers
+    huggingface.py     # DONE: HFImageBackend — hosted, Qwen/Qwen-Image via InferenceClient
+    diffusers_local.py # deferred: Z-Image Turbo locally — unverified fit on an 8GB machine
   memory/
     embedder.py        # DONE: Embedder protocol
     local_embedder.py  # DONE: SentenceTransformerEmbedder — local, no hosted path works today
@@ -58,10 +59,11 @@ storyillus/
     condense.py        # DONE: step 1: page -> condensed narrative beats
     canonicalize.py    # DONE: collapse alias/first-person references before the store
     retrieve.py        # DONE: step 2: name-keyed + semantic + continuity retrieval
-    prompt_builder.py  # step 3: condensed + context -> image prompt
-    illustrate.py      # step 4: call image backend
+    style.py           # DONE: write-once book-level style block
+    prompt_builder.py  # DONE: step 3: style + context + key visual -> prompt
+    illustrate.py      # DONE: step 4: seed discipline + call image backend
     update_memory.py   # DONE: step 5: write-once entity extraction + scene record
-    graph.py           # orchestration wiring the five steps per page
+    graph.py           # DONE: orchestration wiring steps 2-5 per page
   render/
     book.py            # assemble pages + images into HTML and PDF
   api/
@@ -339,8 +341,7 @@ rather than a folder the user has to fill themselves.
   textual evidence; semantic (threshold) dedup of settings on write (dedup is exact-name only;
   semantic search still happens at *retrieval* time, as designed); style-block generation
   (global/constant, never retrieved — Phase 3's prompt builder consumes it); `graph.py`
-  orchestration threading `previous_scene` across a full page loop (Phase 3, once
-  `illustrate.py`/`prompt_builder.py` exist to make the full five-step loop meaningful).
+  orchestration threading `previous_scene` across a full page loop — done in Phase 3, see below.
 - **Done when:** ✅ running Phase 1b over a story populates a store where querying a
   character's name returns that character's sheet as the top hit.
 - **Verified:** `env -u hf_token uv run pytest -q` — 112 passed. `uv run ruff check .` clean.
@@ -354,6 +355,46 @@ rather than a folder the user has to fill themselves.
   `store.get_by_name("Victor Frankenstein")` returned the exact written sheet (build, hair,
   clothing, all grounded in the text), and an unseen name (`Robert Walton`) correctly returned
   `None` rather than a hallucinated sheet.
+
+### Phase 3 — Image generation
+- DONE: `imagegen/huggingface.py` (`HFImageBackend`, `huggingface_hub.InferenceClient`) +
+  `agent/style.py` (write-once style block) + `agent/prompt_builder.py` (style + context +
+  key visual, comma-joined) + `agent/illustrate.py` (seed discipline: base seed + per-character
+  hash offset) + `agent/graph.py` (orchestration — retrieve → prompt → illustrate → memory,
+  per page). CLI: `uv run storyillus illustrate <canonical.json> --config configs/hosted.yaml
+  --store .cache/memory.json --out-dir .cache/images`.
+- **`configs/hosted.yaml`'s image model was wrong.** `Qwen/Qwen-Image-Edit-2511` only supports
+  image-to-image — confirmed live, it 400s on a plain text prompt. `Qwen/Qwen-Image` (same
+  family, Apache 2.0) generates from text alone; fixed the config. `Edit-2511`'s multi-
+  reference conditioning is Phase 5's job, as `models.md` always intended.
+- **Hosted image generation is `huggingface_hub.InferenceClient`, not the OpenAI client** —
+  the router serves it through its own `text_to_image` method, not an OpenAI-style path.
+  Verified live with the full parameter set (`negative_prompt`, `width`, `height`,
+  `num_inference_steps`, `guidance_scale`, `seed`) all honored.
+- **Two fail-soft policies, deliberately different, both from the guiding constraints:** an
+  image-generation failure becomes a `PageResult` with a placeholder and a logged error,
+  page-local, the run continues; an `update_memory` `APIStatusError` (systemic LLM quota)
+  propagates and stops the whole run, preserving whatever was already rendered — same posture
+  `_plan_pages`/`_canonicalize_document`/`_remember_document` already use.
+- **Real bug found by the live run, not the unit tests: image filenames collided across
+  chapters.** Page index resets to 1 in every chapter; `page-{page_index}.png` alone meant
+  chapter 2's 9 pages silently overwrote chapter 1's first 7 renders on disk — the CLI reported
+  "Rendered 16/16" correctly (16 `PageResult`s produced, zero errors) while only 9 files
+  actually survived. Fixed by qualifying filenames with `chapter_index`
+  (`ch005-page001.png`); added a regression test asserting two chapters sharing a page index
+  produce distinct, both-existing files. `update_memory.py`'s analogous scene-record naming
+  collision (documented in Phase 2) remains a known, non-blocking issue — `graph.py` never
+  looks scenes up by name, so nothing here depends on it, but a future consumer of the store's
+  raw scene records by name would hit the same class of bug.
+- **Deliberately deferred:** the local `diffusers`/`Z-Image-Turbo` backend (unverified fit on
+  an 8GB machine); `Qwen-Image-Edit-2511` reference-image conditioning for stronger identity
+  (Phase 5); user-specifiable style overrides (chose LLM-derived-only for now).
+- **Done when:** ✅ the full five-step loop renders every page of the example story.
+- **Verified:** `env -u hf_token uv run pytest -q` — 127 passed. `uv run ruff check .` clean.
+  Live run against `.cache/ch5-6-canonical.json`: 16/16 pages rendered, zero placeholders, one
+  style block generated once (`kind="style"`, a gothic/chiaroscuro oil-painting description
+  matching the story's tone) and reused across every page. Spot-checked `ch005-page001.png`:
+  a coherent, evocative painterly image consistent with the generated style block.
 
 ### Phase 3 — Image generation
 - Diffusers backend (SD 1.5 first — fastest to iterate), prompt builder that fuses style
@@ -443,10 +484,12 @@ Resolved: chapter-level scope and local single-user hosting — see Scope Decisi
 6. ~~Phase 2: name canonicalisation before the vector store~~ — done. See Phase 2 above.
 7. ~~`memory/` — embedder, `VectorStore` protocol~~ — done (as a local embedder and a
    hand-rolled store, not the originally-proposed hosted embeddings / Chroma — see Phase 2).
-8. **Phase 3: image generation.** Diffusers backend (SD 1.5 first) + `prompt_builder.py`
-   fusing the style block, `retrieve()`'s context, and `plan.key_visual`. `.cache/memory.json`
-   (character/setting sheets) and `.cache/ch5-6-canonical.json` (plans) are both ready fixtures
-   to develop it against at zero token cost.
+8. ~~Phase 3: image generation~~ — done, hosted-only (`Qwen/Qwen-Image` via
+   `huggingface_hub.InferenceClient`, not the originally-proposed SD 1.5/diffusers — see
+   Phase 3). 16/16 pages of the ch5-6 fixture rendered live.
+9. **Phase 4: assembly.** HTML book renderer (text page + facing illustration), PDF export,
+   run manifest JSON. `.cache/images/` (16 rendered pages) and `.cache/memory.json` are both
+   ready fixtures to develop it against at zero additional cost.
 
 `examples/short_story.txt` is no longer needed as the primary fixture — chapter 1 of a
 fetched Gutenberg book is a better one, since it's the actual input shape the product takes.
